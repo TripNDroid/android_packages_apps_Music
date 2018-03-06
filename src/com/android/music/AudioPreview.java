@@ -16,6 +16,7 @@
 
 package com.android.music;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.AsyncQueryHandler;
 import android.content.ContentResolver;
@@ -31,6 +32,7 @@ import android.media.MediaPlayer.OnPreparedListener;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.text.TextUtils;
@@ -42,20 +44,32 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.SeekBar.OnSeekBarChangeListener;
 import android.widget.Toast;
+import android.view.KeyEvent;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
+
+import com.android.music.custom.PermissionActivity;
 
 import java.io.IOException;
 
 /**
  * Dialog that comes up in response to various music-related VIEW intents.
  */
-public class AudioPreview
-        extends Activity implements OnPreparedListener, OnErrorListener, OnCompletionListener {
+public class AudioPreview extends Activity implements OnPreparedListener, OnErrorListener, OnCompletionListener
+{
     private final static String TAG = "AudioPreview";
+    private final static String HOST_DOWNLOADS = "downloads";
+    private static final String COLUMN_MEDIAPROVIDER_URI = "mediaprovider_uri";
+    private static final String[] REQUIRED_PERMISSIONS = {
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE};
     private PreviewPlayer mPlayer;
     private TextView mTextLine1;
     private TextView mTextLine2;
@@ -63,18 +77,25 @@ public class AudioPreview
     private SeekBar mSeekBar;
     private Handler mProgressRefresher;
     private boolean mSeeking = false;
-    private boolean mUiPaused = true;
     private int mDuration;
     private Uri mUri;
     private long mMediaId = -1;
     private static final int OPEN_IN_MUSIC = 1;
     private AudioManager mAudioManager;
     private boolean mPausedByTransientLossOfFocus;
+    private BroadcastReceiver mAudioTrackListener;
+
+    private int mSeekStopPosition;
+    private boolean isCompleted = false;
+    private Uri mMediaUri = null;
+    private static AudioPreview mAudioPreview;
+    private ImageView mImageViewDrmIcon;
 
     @Override
     public void onCreate(Bundle icicle) {
         super.onCreate(icicle);
 
+        mAudioPreview = this;
         Intent intent = getIntent();
         if (intent == null) {
             finish();
@@ -86,7 +107,7 @@ public class AudioPreview
             return;
         }
         String scheme = mUri.getScheme();
-
+        
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         setContentView(R.layout.audiopreview);
@@ -94,6 +115,7 @@ public class AudioPreview
         mTextLine1 = (TextView) findViewById(R.id.line1);
         mTextLine2 = (TextView) findViewById(R.id.line2);
         mLoadingText = (TextView) findViewById(R.id.loading);
+        mImageViewDrmIcon = (ImageView) findViewById(R.id.drm_icon);
         if (scheme.equals("http")) {
             String msg = getString(R.string.streamloadingtext, mUri.getHost());
             mLoadingText.setText(msg);
@@ -104,111 +126,42 @@ public class AudioPreview
         mProgressRefresher = new Handler();
         mAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
-        PreviewPlayer player = (PreviewPlayer) getLastNonConfigurationInstance();
-        if (player == null) {
-            mPlayer = new PreviewPlayer();
-            mPlayer.setActivity(this);
-            try {
-                mPlayer.setDataSourceAndPrepare(mUri);
-            } catch (Exception ex) {
-                // catch generic Exception, since we may be called with a media
-                // content URI, another content provider's URI, a file URI,
-                // an http URI, and there are different exceptions associated
-                // with failure to open each of those.
-                Log.d(TAG, "Failed to open file: " + ex);
-                Toast.makeText(this, R.string.playback_failed, Toast.LENGTH_SHORT).show();
-                finish();
-                return;
-            }
-        } else {
-            mPlayer = player;
-            mPlayer.setActivity(this);
-            // onResume will update the UI
-        }
-
-        AsyncQueryHandler mAsyncQueryHandler = new AsyncQueryHandler(getContentResolver()) {
-            @Override
-            protected void onQueryComplete(int token, Object cookie, Cursor cursor) {
-                if (cursor != null && cursor.moveToFirst()) {
-                    int titleIdx = cursor.getColumnIndex(MediaStore.Audio.Media.TITLE);
-                    int artistIdx = cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST);
-                    int idIdx = cursor.getColumnIndex(MediaStore.Audio.Media._ID);
-                    int displaynameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-
-                    if (idIdx >= 0) {
-                        mMediaId = cursor.getLong(idIdx);
-                    }
-
-                    if (titleIdx >= 0) {
-                        String title = cursor.getString(titleIdx);
-                        mTextLine1.setText(title);
-                        if (artistIdx >= 0) {
-                            String artist = cursor.getString(artistIdx);
-                            mTextLine2.setText(artist);
-                        }
-                    } else if (displaynameIdx >= 0) {
-                        String name = cursor.getString(displaynameIdx);
-                        mTextLine1.setText(name);
-                    } else {
-                        // Couldn't find anything to display, what to do now?
-                        Log.w(TAG, "Cursor had no names for us");
-                    }
-                } else {
-                    Log.w(TAG, "empty cursor");
-                }
-
-                if (cursor != null) {
-                    cursor.close();
-                }
-                setNames();
-            }
-        };
-
-        if (scheme.equals(ContentResolver.SCHEME_CONTENT)) {
-            if (mUri.getAuthority() == MediaStore.AUTHORITY) {
-                // try to get title and artist from the media content provider
-                mAsyncQueryHandler.startQuery(0, null, mUri,
-                        new String[] {MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST},
-                        null, null, null);
-            } else {
-                // Try to get the display name from another content provider.
-                // Don't specifically ask for the display name though, since the
-                // provider might not actually support that column.
-                mAsyncQueryHandler.startQuery(0, null, mUri, null, null, null, null);
-            }
-        } else if (scheme.equals("file")) {
-            // check if this file is in the media database (clicking on a download
-            // in the download manager might follow this path
-            String path = mUri.getPath();
-            mAsyncQueryHandler.startQuery(0, null, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                    new String[] {MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE,
-                            MediaStore.Audio.Media.ARTIST},
-                    MediaStore.Audio.Media.DATA + "=?", new String[] {path}, null);
-        } else {
-            // We can't get metadata from the file/stream itself yet, because
-            // that API is hidden, so instead we display the URI being played
-            if (mPlayer.isPrepared()) {
-                setNames();
-            }
-        }
+        checkAndHandlePermission();
     }
 
     @Override
-    public void onPause() {
-        super.onPause();
-        mUiPaused = true;
-        if (mProgressRefresher != null) {
-            mProgressRefresher.removeCallbacksAndMessages(null);
-        }
-    }
-
-    @Override
-    public void onResume() {
+    protected void onResume() {
         super.onResume();
-        mUiPaused = false;
-        if (mPlayer.isPrepared()) {
-            showPostPrepareUI();
+        mScreenOff = false;
+        if (!isCompleted) {
+            mProgressRefresher.removeCallbacksAndMessages(null);
+            mProgressRefresher.post(new ProgressRefresher());
         }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        IntentFilter f = new IntentFilter();
+        f.addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+        mAudioTrackListener = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(action)) {
+                    if (mPlayer != null && mPlayer.isPlaying()) {
+                        mPlayer.pause();
+                        updatePlayPause();
+                    }
+                 }
+             }
+        };
+        registerReceiver(mAudioTrackListener, f);
+
+        IntentFilter s = new IntentFilter();
+        s.addAction(Intent.ACTION_SCREEN_ON);
+        s.addAction(Intent.ACTION_SCREEN_OFF);
+        registerReceiver(mScreenTimeoutListener, new IntentFilter(s));
     }
 
     @Override
@@ -218,10 +171,33 @@ public class AudioPreview
         return player;
     }
 
+     @Override
+    protected void onStop() {
+        super.onStop();
+        if(mAudioTrackListener != null) {
+        unregisterReceiver(mAudioTrackListener);
+        mAudioTrackListener = null;
+        }
+        if (mScreenTimeoutListener != null) {
+            unregisterReceiver(mScreenTimeoutListener);
+            mScreenTimeoutListener = null;
+        }
+    }
+
     @Override
     public void onDestroy() {
         stopPlayback();
         super.onDestroy();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_UP &&
+                event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            finish();
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     private void stopPlayback() {
@@ -238,8 +214,11 @@ public class AudioPreview
     @Override
     public void onUserLeaveHint() {
         stopPlayback();
-        finish();
         super.onUserLeaveHint();
+        // stopPlayback will set mPlayer as null, while mPlayer is null,
+        // onKeyDown will return directly but not call finish
+        // So, we should invoke finish here but not depends on onKeyDown
+        finish();
     }
 
     public void onPrepared(MediaPlayer mp) {
@@ -273,7 +252,7 @@ public class AudioPreview
         }
         updatePlayPause();
     }
-
+    
     private OnAudioFocusChangeListener mAudioFocusListener = new OnAudioFocusChangeListener() {
         public void onAudioFocusChange(int focusChange) {
             if (mPlayer == null) {
@@ -304,14 +283,15 @@ public class AudioPreview
             updatePlayPause();
         }
     };
-
+    
     private void start() {
         mAudioManager.requestAudioFocus(mAudioFocusListener, AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
         mPlayer.start();
+        isCompleted = false;
         mProgressRefresher.postDelayed(new ProgressRefresher(), 200);
     }
-
+    
     public void setNames() {
         if (TextUtils.isEmpty(mTextLine1.getText())) {
             mTextLine1.setText(mUri.getLastPathSegment());
@@ -324,17 +304,33 @@ public class AudioPreview
     }
 
     class ProgressRefresher implements Runnable {
-        @Override
+
         public void run() {
+            if (mScreenOff) return;
             if (mPlayer != null && !mSeeking && mDuration != 0) {
+                int progress = mPlayer.getCurrentPosition() / mDuration;
                 mSeekBar.setProgress(mPlayer.getCurrentPosition());
             }
             mProgressRefresher.removeCallbacksAndMessages(null);
-            if (!mUiPaused) {
-                mProgressRefresher.postDelayed(new ProgressRefresher(), 200);
-            }
+            mProgressRefresher.postDelayed(new ProgressRefresher(), 200);
         }
     }
+    
+    private boolean mScreenOff;
+    private BroadcastReceiver mScreenTimeoutListener = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
+                mScreenOff = false;
+                if(!isCompleted) {
+                    mProgressRefresher.removeCallbacksAndMessages(null);
+                    mProgressRefresher.postDelayed(new ProgressRefresher(), 200);
+                }
+            } else if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())) {
+                mScreenOff = true;
+            }
+        }
+    };
 
     private void updatePlayPause() {
         ImageButton b = (ImageButton) findViewById(R.id.playpause);
@@ -360,9 +356,12 @@ public class AudioPreview
             if (mPlayer == null) {
                 return;
             }
-            mPlayer.seekTo(progress);
+            mSeekStopPosition = progress;
         }
         public void onStopTrackingTouch(SeekBar bar) {
+            if (mPlayer != null) {
+                mPlayer.seekTo(mSeekStopPosition);
+            }
             mSeeking = false;
         }
     };
@@ -374,6 +373,9 @@ public class AudioPreview
     }
 
     public void onCompletion(MediaPlayer mp) {
+        // Leave 100ms for mediaplayer to change state.
+        SystemClock.sleep(100);
+        isCompleted = true;
         mSeekBar.setProgress(mDuration);
         updatePlayPause();
     }
@@ -390,7 +392,7 @@ public class AudioPreview
         }
         updatePlayPause();
     }
-
+    
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
         super.onCreateOptionsMenu(menu);
@@ -398,7 +400,7 @@ public class AudioPreview
         // database, and we could open it in the full music app instead.
         // Ideally, we would hand off the currently running mediaplayer
         // to the music UI, which can probably be done via a public static
-        menu.add(0, OPEN_IN_MUSIC, 0, "open in music");
+        menu.add(0, OPEN_IN_MUSIC, 0, R.string.open_in_music);
         return true;
     }
 
@@ -414,7 +416,33 @@ public class AudioPreview
     }
 
     @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+    // TODO Auto-generated method stub
+        switch (item.getItemId()) {
+            case OPEN_IN_MUSIC:
+                if (HOST_DOWNLOADS.equals(mUri.getHost()) && mMediaUri != null) {
+                    Intent intent = new Intent(Intent.ACTION_VIEW);
+                    intent.setDataAndType(mMediaUri, "audio/*");
+                    startActivity(intent);
+                } else {
+                    Intent intent = new Intent(Intent.ACTION_VIEW);
+                    intent.setDataAndType(mUri, "audio/*");
+                    startActivity(intent);
+                }
+                break;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+
+    @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        // Null pointer check here is to avoid monkey test failure.
+        // Key down event will be received even when acitivity is
+        // about to finish.
+        if (mPlayer == null) {
+            return true;
+        }
+
         switch (keyCode) {
             case KeyEvent.KEYCODE_HEADSETHOOK:
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
@@ -443,6 +471,9 @@ public class AudioPreview
             case KeyEvent.KEYCODE_MEDIA_STOP:
             case KeyEvent.KEYCODE_BACK:
                 stopPlayback();
+                if (MusicUtils.sService == null) {
+                    System.exit(0);
+                }
                 finish();
                 return true;
         }
@@ -465,9 +496,8 @@ public class AudioPreview
         }
 
         public void setDataSourceAndPrepare(Uri uri) throws IllegalArgumentException,
-                                                            SecurityException,
-                                                            IllegalStateException, IOException {
-            setDataSource(mActivity, uri);
+                        SecurityException, IllegalStateException, IOException {
+            setDataSource(mActivity,uri);
             prepareAsync();
         }
 
@@ -482,6 +512,174 @@ public class AudioPreview
 
         boolean isPrepared() {
             return mIsPrepared;
+        }
+    }
+
+    public static AudioPreview getInstance(){
+        return mAudioPreview;
+    }
+
+    private static final int REQUEST_CODE_PERMISSION = 100;
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (REQUEST_CODE_PERMISSION == requestCode) {
+            if (Activity.RESULT_OK == resultCode) {
+                initData();
+            } else {
+                finish();
+            }
+        } else {
+            super.onActivityResult(requestCode, resultCode, data);
+        }
+    }
+
+    private void checkAndHandlePermission() {
+        String[] neededPermissions = PermissionActivity.checkRequestedPermission(this,
+                REQUIRED_PERMISSIONS);
+        if (neededPermissions.length == 0) {
+            initData();
+        } else {
+            PermissionActivity.startFromPreview(this, REQUIRED_PERMISSIONS,
+                    REQUEST_CODE_PERMISSION);
+        }
+    }
+
+    private void initData() {
+        String scheme = mUri.getScheme();
+
+        PreviewPlayer player = (PreviewPlayer) getLastNonConfigurationInstance();
+        if (player == null) {
+            mPlayer = new PreviewPlayer();
+            mPlayer.setActivity(this);
+            try {
+                mPlayer.setDataSourceAndPrepare(mUri);
+            } catch (Exception ex) {
+                // catch generic Exception, since we may be called with a media
+                // content URI, another content provider's URI, a file URI,
+                // an http URI, and there are different exceptions associated
+                // with failure to open each of those.
+                Log.d(TAG, "Failed to open file: " + ex);
+                int errorTipsId = R.string.playback_failed;
+                if (ex instanceof IOException) {
+                    errorTipsId = R.string.audio_preview_fail_io;
+                } else if (ex instanceof SecurityException) {
+                    errorTipsId = R.string.audio_preview_fail_security;
+                } else if (ex instanceof  IllegalStateException) {
+                    errorTipsId = R.string.audio_preview_fail_illegal_state;
+                } else if (ex instanceof  IllegalArgumentException) {
+                    errorTipsId = R.string.audio_preview_fail_illegal_argument;
+                }
+                Toast.makeText(this, errorTipsId, Toast.LENGTH_SHORT).show();
+                finish();
+                return;
+            }
+        } else {
+            mPlayer = player;
+            mPlayer.setActivity(this);
+            if (mPlayer.isPrepared()) {
+                showPostPrepareUI();
+            }
+        }
+
+        AsyncQueryHandler mAsyncQueryHandler = new AsyncQueryHandler(getContentResolver()) {
+            @Override
+            protected void onQueryComplete(int token, Object cookie, Cursor cursor) {
+                if (cursor != null && cursor.moveToFirst()) {
+
+                    int titleIdx = cursor.getColumnIndex(MediaStore.Audio.Media.TITLE);
+                    int artistIdx = cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST);
+                    int idIdx = cursor.getColumnIndex(MediaStore.Audio.Media._ID);
+                    int displaynameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    int uriIdx = cursor.getColumnIndex(COLUMN_MEDIAPROVIDER_URI);
+                    if (uriIdx >=0 && cursor.getString(uriIdx) != null) {
+                        mMediaUri = Uri.parse(cursor.getString(uriIdx));
+                    }
+
+                    if (idIdx >=0) {
+                        mMediaId = cursor.getLong(idIdx);
+                    }
+
+                    if (titleIdx >= 0) {
+                        String title = cursor.getString(titleIdx);
+                        mTextLine1.setText(title);
+                        if (artistIdx >= 0) {
+                            String artist = cursor.getString(artistIdx);
+                            if(artist == null || artist.equals(MediaStore.UNKNOWN_STRING)) {
+                                artist = getString(R.string.unknown_artist_name);
+                            }
+                            mTextLine2.setText(artist);
+                        }
+                    } else if (displaynameIdx >= 0) {
+                        String name = cursor.getString(displaynameIdx);
+                        mTextLine1.setText(name);
+                    } else {
+                        // Couldn't find anything to display, what to do now?
+                        Log.w(TAG, "Cursor had no names for us");
+                    }
+                } else {
+                    Log.w(TAG, "empty cursor");
+                }
+
+                // Show DRM lock icon on audio preview screen
+                String data = "";
+                try {
+                    int dataIdx = cursor
+                            .getColumnIndexOrThrow(MediaStore.Audio.Media.DATA);
+                    data = cursor.getString(dataIdx);
+                } catch (Exception e) {
+                    Log.i(TAG, "_data column not found");
+                }
+                boolean isDrm = !TextUtils.isEmpty(data)
+                        && (data.endsWith(".dm") || data.endsWith(".dcf"));
+                if (isDrm) {
+                    mImageViewDrmIcon.setVisibility(View.VISIBLE);
+                } else {
+                    mImageViewDrmIcon.setVisibility(View.GONE);
+                }
+
+                if (cursor != null) {
+                    cursor.close();
+                }
+                setNames();
+            }
+        };
+
+        if (scheme.equals(ContentResolver.SCHEME_CONTENT)) {
+            if (mUri.getAuthority() == MediaStore.AUTHORITY) {
+                // try to get title and artist from the media content provider
+                mAsyncQueryHandler.startQuery(0, null, mUri, new String [] {
+                                MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST},
+                        null, null, null);
+            } else {
+                final String authority = mUri.getAuthority();
+                // hide option menu if the uri may not be opened by music app
+                if (authority.contains("attachmentprovider") || authority.contains("mms")) {
+                    mMediaId = -1;
+                    if (mPlayer != null && mPlayer.isPrepared()) {
+                        setNames();
+                    }
+                } else {
+                    // Try to get the display name from another content provider.
+                    // Don't specifically ask for the display name though, since the
+                    // provider might not actually support that column.
+                    mAsyncQueryHandler.startQuery(0, null, mUri, null, null, null, null);
+                }
+            }
+        } else if (scheme.equals("file")) {
+            // check if this file is in the media database (clicking on a download
+            // in the download manager might follow this path
+            String path = mUri.getPath();
+            mAsyncQueryHandler.startQuery(0, null,  MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    new String [] {MediaStore.Audio.Media._ID,
+                            MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST},
+                    MediaStore.Audio.Media.DATA + "=?", new String [] {path}, null);
+        } else {
+            // We can't get metadata from the file/stream itself yet, because
+            // that API is hidden, so instead we display the URI being played
+            if (mPlayer.isPrepared()) {
+                setNames();
+            }
         }
     }
 }

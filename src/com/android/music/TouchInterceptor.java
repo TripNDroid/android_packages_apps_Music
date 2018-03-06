@@ -19,11 +19,14 @@ package com.android.music;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.res.Resources;
+import android.database.ContentObserver;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LevelListDrawable;
+import android.os.Handler;
+import android.provider.MediaStore;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.GestureDetector;
@@ -38,7 +41,11 @@ import android.widget.AdapterView;
 import android.widget.ImageView;
 import android.widget.ListView;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+
 public class TouchInterceptor extends ListView {
+    
     private ImageView mDragView;
     private WindowManager mWindowManager;
     private WindowManager.LayoutParams mWindowParams;
@@ -51,10 +58,10 @@ public class TouchInterceptor extends ListView {
      * At which position was the item being dragged originally
      */
     private int mSrcDragPos;
-    private int mDragPointX; // at what x offset inside the item did the user grab it
-    private int mDragPointY; // at what y offset inside the item did the user grab it
-    private int mXOffset; // the difference between screen coordinates and coordinates in this view
-    private int mYOffset; // the difference between screen coordinates and coordinates in this view
+    private int mDragPointX;    // at what x offset inside the item did the user grab it
+    private int mDragPointY;    // at what y offset inside the item did the user grab it
+    private int mXOffset;  // the difference between screen coordinates and coordinates in this view
+    private int mYOffset;  // the difference between screen coordinates and coordinates in this view
     private DragListener mDragListener;
     private DropListener mDropListener;
     private RemoveListener mRemoveListener;
@@ -73,10 +80,11 @@ public class TouchInterceptor extends ListView {
     private int mItemHeightExpanded;
     private int mItemHeightHalf;
     private Drawable mTrashcan;
+    public final int SCREEN_WIDTH = 5000;
 
     public TouchInterceptor(Context context, AttributeSet attrs) {
         super(context, attrs);
-        SharedPreferences pref = context.getSharedPreferences("Music", 0);
+        SharedPreferences pref = context.getSharedPreferences("Music", 3);
         mRemoveMode = pref.getInt("deletemode", -1);
         mTouchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         Resources res = getResources();
@@ -84,22 +92,21 @@ public class TouchInterceptor extends ListView {
         mItemHeightHalf = mItemHeightNormal / 2;
         mItemHeightExpanded = res.getDimensionPixelSize(R.dimen.expanded_height);
     }
-
+    
     @Override
     public boolean onInterceptTouchEvent(MotionEvent ev) {
         if (mRemoveListener != null && mGestureDetector == null) {
             if (mRemoveMode == FLING) {
                 mGestureDetector = new GestureDetector(getContext(), new SimpleOnGestureListener() {
                     @Override
-                    public boolean onFling(
-                            MotionEvent e1, MotionEvent e2, float velocityX, float velocityY) {
+                    public boolean onFling(MotionEvent e1, MotionEvent e2, float velocityX,
+                            float velocityY) {
                         if (mDragView != null) {
                             if (velocityX > 1000) {
                                 Rect r = mTempRect;
                                 mDragView.getDrawingRect(r);
-                                if (e2.getX() > r.right * 2 / 3) {
-                                    // fast fling right with release near the right edge of the
-                                    // screen
+                                if ( e2.getX() > r.right * 2 / 3) {
+                                    // fast fling right with release near the right edge of the screen
                                     stopDragging();
                                     mRemoveListener.remove(mSrcDragPos);
                                     unExpandViews(true);
@@ -118,6 +125,12 @@ public class TouchInterceptor extends ListView {
                 case MotionEvent.ACTION_DOWN:
                     int x = (int) ev.getX();
                     int y = (int) ev.getY();
+
+                    // force children to be recreated
+                    try {
+                        layoutChildren();
+                    } catch (IllegalStateException ex) {
+                    }
                     int itemnum = pointToPosition(x, y);
                     if (itemnum == AdapterView.INVALID_POSITION) {
                         break;
@@ -125,10 +138,28 @@ public class TouchInterceptor extends ListView {
                     ViewGroup item = (ViewGroup) getChildAt(itemnum - getFirstVisiblePosition());
                     mDragPointX = x - item.getLeft();
                     mDragPointY = y - item.getTop();
-                    mXOffset = ((int) ev.getRawX()) - x;
-                    mYOffset = ((int) ev.getRawY()) - y;
-                    // The left side of the item is the grabber for dragging the item
-                    if (x < 64) {
+                    mXOffset = ((int)ev.getRawX()) - x;
+                    mYOffset = ((int)ev.getRawY()) - y;
+                    boolean layoutRtl = (View.LAYOUT_DIRECTION_RTL == getLayoutDirection());
+                    if (layoutRtl){
+                        // The right side of the item is the grabber for dragging the item
+                        if (x > item.getRight() - 64){
+                            item.setDrawingCacheEnabled(true);
+                            // Create a copy of the drawing cache so that it does not get recycled
+                            // by the framework when the list tries to clean up memory
+                            Bitmap bitmap = Bitmap.createBitmap(item.getDrawingCache());
+                            startDragging(bitmap, x, y);
+                            mDragPos = itemnum;
+                            mSrcDragPos = mDragPos;
+                            mHeight = getHeight();
+                            int touchSlop = mTouchSlop;
+                            mUpperBound = Math.min(y - touchSlop, mHeight / 3);
+                            mLowerBound = Math.max(y + touchSlop, mHeight * 2 /3);
+                            return false;
+                        }
+                    }
+                    else if (x < 128) {
+                        // The left side of the item is the grabber for dragging the item
                         item.setDrawingCacheEnabled(true);
                         // Create a copy of the drawing cache so that it does not get recycled
                         // by the framework when the list tries to clean up memory
@@ -139,7 +170,7 @@ public class TouchInterceptor extends ListView {
                         mHeight = getHeight();
                         int touchSlop = mTouchSlop;
                         mUpperBound = Math.min(y - touchSlop, mHeight / 3);
-                        mLowerBound = Math.max(y + touchSlop, mHeight * 2 / 3);
+                        mLowerBound = Math.max(y + touchSlop, mHeight * 2 /3);
                         return false;
                     }
                     stopDragging();
@@ -148,12 +179,13 @@ public class TouchInterceptor extends ListView {
         }
         return super.onInterceptTouchEvent(ev);
     }
-
+    
     /*
      * pointToPosition() doesn't consider invisible views, but we
      * need to, so implement a slightly different version.
      */
     private int myPointToPosition(int x, int y) {
+
         if (y < 0) {
             // when dragging off the top of the screen, calculate position
             // by going back from a visible item
@@ -174,7 +206,7 @@ public class TouchInterceptor extends ListView {
         }
         return INVALID_POSITION;
     }
-
+    
     private int getItemForPosition(int y) {
         int adjustedy = y - mDragPointY - mItemHeightHalf;
         int pos = myPointToPosition(0, adjustedy);
@@ -189,7 +221,7 @@ public class TouchInterceptor extends ListView {
         }
         return pos;
     }
-
+    
     private void adjustScrollBounds(int y) {
         if (y >= mHeight / 3) {
             mUpperBound = mHeight / 3;
@@ -232,7 +264,7 @@ public class TouchInterceptor extends ListView {
             v.setVisibility(View.VISIBLE);
         }
     }
-
+    
     /* Adjust visibility and size to make it appear as though
      * an item is being dragged around and other items are making
      * room for it:
@@ -271,9 +303,14 @@ public class TouchInterceptor extends ListView {
                 }
             } else if (vv.equals(first)) {
                 // processing the item that is being dragged
-                if (mDragPos == mSrcDragPos || getPositionForView(vv) == getCount() - 1) {
+                if (mDragPos == mSrcDragPos) {
                     // hovering over the original location
                     visibility = View.INVISIBLE;
+                } else if (getPositionForView(vv) == getCount() - 1) {
+                    // Children views will be set Visible in unExpandViews(), and it use
+                    // getChildAt(i) to get these children, but if we set INVISIBLE for last
+                    // item here, getChildAt() in unExpandViews() will return null(Why? I don't
+                    // know neither), and unExpandViews can not restore views' visibility
                 } else {
                     // not hovering over it
                     // Ideally the item would be completely gone, but neither
@@ -318,7 +355,7 @@ public class TouchInterceptor extends ListView {
                         unExpandViews(false);
                     }
                     break;
-
+                    
                 case MotionEvent.ACTION_DOWN:
                 case MotionEvent.ACTION_MOVE:
                     int x = (int) ev.getX();
@@ -363,12 +400,12 @@ public class TouchInterceptor extends ListView {
         }
         return super.onTouchEvent(ev);
     }
-
+    
     private void startDragging(Bitmap bm, int x, int y) {
         stopDragging();
 
         mWindowParams = new WindowManager.LayoutParams();
-        mWindowParams.gravity = Gravity.TOP | Gravity.LEFT;
+        mWindowParams.gravity = Gravity.TOP | Gravity.START;
         mWindowParams.x = x - mDragPointX + mXOffset;
         mWindowParams.y = y - mDragPointY + mYOffset;
 
@@ -381,27 +418,27 @@ public class TouchInterceptor extends ListView {
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
         mWindowParams.format = PixelFormat.TRANSLUCENT;
         mWindowParams.windowAnimations = 0;
-
+        
         Context context = getContext();
         ImageView v = new ImageView(context);
-        // int backGroundColor = context.getResources().getColor(R.color.dragndrop_background);
-        // v.setBackgroundColor(backGroundColor);
-        v.setBackgroundResource(R.drawable.playlist_tile_drag);
+        //int backGroundColor = context.getResources().getColor(R.color.dragndrop_background);
+        //v.setBackgroundColor(backGroundColor);
+        //v.setBackgroundResource(R.drawable.playlist_tile_drag);
         v.setPadding(0, 0, 0, 0);
         v.setImageBitmap(bm);
         mDragBitmap = bm;
 
-        mWindowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        mWindowManager = (WindowManager)context.getSystemService(Context.WINDOW_SERVICE);
         mWindowManager.addView(v, mWindowParams);
         mDragView = v;
     }
-
+    
     private void dragView(int x, int y) {
         if (mRemoveMode == SLIDE) {
             float alpha = 1.0f;
             int width = mDragView.getWidth();
             if (x > width / 2) {
-                alpha = ((float) (width - x)) / (width / 2);
+                alpha = ((float)(width - x)) / (width / 2);
             }
             mWindowParams.alpha = alpha;
         }
@@ -425,12 +462,11 @@ public class TouchInterceptor extends ListView {
             }
         }
     }
-
+    
     private void stopDragging() {
         if (mDragView != null) {
             mDragView.setVisibility(GONE);
-            WindowManager wm =
-                    (WindowManager) getContext().getSystemService(Context.WINDOW_SERVICE);
+            WindowManager wm = (WindowManager)getContext().getSystemService(Context.WINDOW_SERVICE);
             wm.removeView(mDragView);
             mDragView.setImageDrawable(null);
             mDragView = null;
@@ -452,16 +488,41 @@ public class TouchInterceptor extends ListView {
     public void setDragListener(DragListener l) {
         mDragListener = l;
     }
-
+    
     public void setDropListener(DropListener l) {
         mDropListener = l;
     }
-
+    
     public void setRemoveListener(RemoveListener l) {
         mRemoveListener = l;
     }
 
-    public interface DragListener { void drag(int from, int to); }
-    public interface DropListener { void drop(int from, int to); }
-    public interface RemoveListener { void remove(int which); }
+    public interface DragListener {
+        void drag(int from, int to);
+    }
+    public interface DropListener {
+        void drop(int from, int to);
+    }
+    public interface RemoveListener {
+        void remove(int which);
+    }
+
+    /**
+     *  Register the new playlist observer to monitor the database change
+     */
+    void registerContentObserver(Context context) {
+        context.getContentResolver().registerContentObserver(
+                MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI, true, mContentObserver);
+    }
+
+    void unregisterContentObserver(Context context) {
+        context.getContentResolver().unregisterContentObserver(mContentObserver);
+    }
+
+    private final ContentObserver mContentObserver = new ContentObserver(new Handler()) {
+        @Override
+        public void onChange(boolean selfChange) {
+            super.onChange(selfChange);
+        }
+    };
 }

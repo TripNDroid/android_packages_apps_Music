@@ -27,34 +27,67 @@ import android.provider.MediaStore;
 import android.view.Window;
 import android.view.WindowManager;
 
-public class ScanningProgress extends Activity {
+public class ScanningProgress extends Activity
+{
     private final static int CHECK = 0;
+    private final static int EXTERNAL_CHECK_OK = 1;
+    private final static int EXTERNAL_CHECK_FAILED = 2;
     private Handler mHandler = new Handler() {
         @Override
-        public void handleMessage(Message msg) {
-            if (msg.what == CHECK) {
+        public void handleMessage(Message msg)
+        {
+            switch (msg.what) {
+            case CHECK:
                 String status = Environment.getExternalStorageState();
                 if (!status.equals(Environment.MEDIA_MOUNTED)) {
-                    // If the card suddenly got unmounted again, there's
-                    // really no need to keep waiting for the media scanner.
-                    finish();
-                    return;
+                   // If the card suddenly got unmounted again, there's
+                   // really no need to keep waiting for the media scanner.
+                   finish();
+                   return;
                 }
-                Cursor c = MusicUtils.query(ScanningProgress.this,
-                        MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI, null, null, null, null);
-                if (c != null) {
-                    // The external media database is now ready for querying
-                    // (though it may still be in the process of being filled).
-                    c.close();
-                    setResult(RESULT_OK);
-                    finish();
-                    return;
-                }
+                mCheckExternalMediaThread.start();
+                break;
+            case EXTERNAL_CHECK_OK:
+                setResult(RESULT_OK);
+                finish();
+                return;
+            case EXTERNAL_CHECK_FAILED:
                 Message next = obtainMessage(CHECK);
                 sendMessageDelayed(next, 3000);
+                break;
+            default:
+                break;
             }
         }
     };
+
+    private Thread mCheckExternalMediaThread = new Thread() {
+         @Override
+         public void run() {
+             int result = isExternalMediaDatabaseReady() ?
+                          EXTERNAL_CHECK_OK : EXTERNAL_CHECK_FAILED;
+             Message message = mHandler.obtainMessage(result);
+             mHandler.sendMessage(message);
+         }
+    };
+
+    private boolean isExternalMediaDatabaseReady() {
+        boolean isReady = false;
+        Cursor cursor = null;
+        try {
+            cursor = MusicUtils.query(ScanningProgress.this,
+                    MediaStore.Audio.Playlists.EXTERNAL_CONTENT_URI,
+                    null, null, null, null);
+            isReady = (cursor != null);
+        } catch (Exception exception){
+            isReady = false;
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+        return isReady;
+    }
 
     @Override
     public void onCreate(Bundle icicle) {
@@ -67,14 +100,14 @@ public class ScanningProgress extends Activity {
         } else {
             setContentView(R.layout.scanning_nosdcard);
         }
-        getWindow().setLayout(
-                WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT);
+        getWindow().setLayout(WindowManager.LayoutParams.WRAP_CONTENT,
+                                    WindowManager.LayoutParams.WRAP_CONTENT);
         setResult(RESULT_CANCELED);
-
+        
         Message msg = mHandler.obtainMessage(CHECK);
         mHandler.sendMessageDelayed(msg, 1000);
     }
-
+    
     @Override
     public void onDestroy() {
         mHandler.removeMessages(CHECK);

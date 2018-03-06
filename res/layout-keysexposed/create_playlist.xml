@@ -22,37 +22,44 @@
     <TextView android:id="@+id/prompt"
         android:layout_width="match_parent" android:layout_height="wrap_content"
         android:text="@string/create_playlist_create_text_prompt"
-        android:layout_marginTop="8dip"
-        android:layout_marginBottom="8dip"
-        android:layout_marginLeft="8dip"
-        android:layout_marginRight="8dip">
+        android:layout_marginTop="24dp"
+        android:layout_marginStart="24dp"
+        style="@android:style/TextAppearance.Material.Title" >
     </TextView>
 
     <EditText android:id="@+id/playlist"
         android:layout_width="match_parent" android:layout_height="wrap_content"
         android:singleLine="true"
         android:inputType="textCapSentences"
-        android:layout_marginBottom="8dip"
-        android:layout_marginLeft="8dip"
-        android:layout_marginRight="8dip">
+        android:maxLength ="200"
+        android:layout_marginTop="12dp"
+        android:layout_marginStart="20dp"
+        android:layout_marginEnd="24dp">
         <requestFocus />
     </EditText>
 
     <RelativeLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:padding="6dip"
-        android:background="#ffffff" >
+        android:layout_height="match_parent"
+        android:gravity="right|bottom"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp">
 
         <Button android:id="@+id/create"
-            android:layout_width="120dip" android:layout_height="wrap_content" 
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="@string/create_playlist_create_text"
-            android:layout_alignParentLeft="true" />
+            android:layout_alignParentEnd="true"
+            android:layout_gravity="center_horizontal"
+            style="?android:attr/buttonBarButtonStyle" />
 
         <Button android:id="@+id/cancel"
-            android:layout_width="120dip" android:layout_height="wrap_content" 
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="@string/cancel"
-            android:layout_alignParentRight="true" />
+            android:textColor="#DE000000"
+            android:layout_toStartOf="@+id/create"
+            style="?android:attr/buttonBarButtonStyle" />
 
     </RelativeLayout>
 

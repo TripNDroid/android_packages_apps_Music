@@ -21,29 +21,35 @@
 
     <TextView android:id="@+id/prompt"
         android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:layout_marginLeft="8dip"
-        android:layout_marginTop="8dip"
-        android:layout_marginBottom="8dip"
-        android:drawableLeft="@android:drawable/ic_dialog_alert"
-        android:drawablePadding="8dip">
+        android:minHeight="48dp"
+        android:layout_marginTop="18dp"
+        android:paddingEnd="?android:attr/dialogPreferredPadding"
+        android:paddingStart="?android:attr/dialogPreferredPadding"
+        style="@android:style/TextAppearance.Material.Subhead" >
     </TextView>
 
     <RelativeLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="6dip"
-        android:background="#ffffff" >
-
-        <Button android:id="@+id/delete"
-            android:layout_width="120dip" android:layout_height="wrap_content" 
-            android:text="@string/delete_confirm_button_text"
-            android:layout_gravity="center_horizontal"
-            android:layout_alignParentLeft="true" />
+        android:gravity="right|bottom"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp">
 
         <Button android:id="@+id/cancel"
-            android:layout_width="120dip" android:layout_height="wrap_content" 
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="@string/cancel"
-            android:layout_alignParentRight="true" />
+            android:textColor="#DE000000"
+            android:layout_gravity="center_horizontal"
+            android:layout_toStartOf="@+id/delete"
+            style="?android:attr/buttonBarButtonStyle"/>
+
+        <Button android:id="@+id/delete"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="@string/delete_confirm_button_text"
+            android:layout_alignParentEnd="true"
+            style="?android:attr/buttonBarButtonStyle" />
 
     </RelativeLayout>
 

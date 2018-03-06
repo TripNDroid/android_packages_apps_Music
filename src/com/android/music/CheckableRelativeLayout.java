@@ -29,7 +29,9 @@ import android.widget.RelativeLayout;
 public class CheckableRelativeLayout extends RelativeLayout implements Checkable {
     private boolean mChecked;
 
-    private static final int[] CHECKED_STATE_SET = {android.R.attr.state_checked};
+    private static final int[] CHECKED_STATE_SET = {
+        android.R.attr.state_checked
+    };
 
     public CheckableRelativeLayout(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -47,7 +49,7 @@ public class CheckableRelativeLayout extends RelativeLayout implements Checkable
     public void toggle() {
         setChecked(!mChecked);
     }
-
+    
     public boolean isChecked() {
         return mChecked;
     }

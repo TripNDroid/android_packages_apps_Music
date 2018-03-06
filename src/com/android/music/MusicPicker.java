@@ -18,16 +18,25 @@ package com.android.music;
 
 import android.app.ListActivity;
 import android.content.AsyncQueryHandler;
+import android.content.BroadcastReceiver;
 import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.database.CharArrayBuffer;
 import android.database.Cursor;
+//import android.drm.DrmManagerClientWrapper;
+import android.database.DataSetObserver;
+import android.drm.DrmRights;
+//import android.drm.DrmStore.DrmDeliveryType;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
+import android.os.Handler;
 import android.os.Parcelable;
 import android.provider.MediaStore;
 import android.text.TextUtils;
@@ -44,11 +53,13 @@ import android.widget.RadioButton;
 import android.widget.SectionIndexer;
 import android.widget.SimpleCursorAdapter;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.IOException;
 import java.text.Collator;
 import java.util.Formatter;
 import java.util.Locale;
+import android.view.KeyEvent;
 
 /**
  * Activity allowing the user to select a music track on the device, and
@@ -63,7 +74,8 @@ import java.util.Locale;
  * perform filtering of the data as the user presses keys.
  */
 public class MusicPicker extends ListActivity
-        implements View.OnClickListener, MediaPlayer.OnCompletionListener, MusicUtils.Defs {
+        implements View.OnClickListener, MediaPlayer.OnCompletionListener,
+        MusicUtils.Defs {
     static final boolean DBG = false;
     static final String TAG = "MusicPicker";
 
@@ -81,16 +93,22 @@ public class MusicPicker extends ListActivity
     /** Menu item to sort the music list by track title. */
     static final int TRACK_MENU = Menu.FIRST;
     /** Menu item to sort the music list by album title. */
-    static final int ALBUM_MENU = Menu.FIRST + 1;
+    static final int ALBUM_MENU = Menu.FIRST+1;
     /** Menu item to sort the music list by artist name. */
-    static final int ARTIST_MENU = Menu.FIRST + 2;
+    static final int ARTIST_MENU = Menu.FIRST+2;
 
     /** These are the columns in the music cursor that we are interested in. */
-    static final String[] CURSOR_COLS = new String[] {MediaStore.Audio.Media._ID,
-            MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.TITLE_KEY,
-            MediaStore.Audio.Media.DATA, MediaStore.Audio.Media.ALBUM,
-            MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.ARTIST_ID,
-            MediaStore.Audio.Media.DURATION, MediaStore.Audio.Media.TRACK};
+    static final String[] CURSOR_COLS = new String[] {
+            MediaStore.Audio.Media._ID,
+            MediaStore.Audio.Media.TITLE,
+            MediaStore.Audio.Media.TITLE_KEY,
+            MediaStore.Audio.Media.DATA,
+            MediaStore.Audio.Media.ALBUM,
+            MediaStore.Audio.Media.ARTIST,
+            MediaStore.Audio.Media.ARTIST_ID,
+            MediaStore.Audio.Media.DURATION,
+            MediaStore.Audio.Media.TRACK
+    };
 
     /** Formatting optimization to avoid creating many temporary objects. */
     static StringBuilder sFormatBuilder = new StringBuilder();
@@ -138,6 +156,8 @@ public class MusicPicker extends ListActivity
     /** Completel Uri that the user has last selected. */
     Uri mSelectedUri;
 
+    private AudioManager mAudioManager;
+
     /** If >= 0, we are currently playing a track for preview, and this is its
      * row ID. */
     long mPlayingId = -1;
@@ -145,12 +165,15 @@ public class MusicPicker extends ListActivity
     /** This is used for playing previews of the music files. */
     MediaPlayer mMediaPlayer;
 
+    boolean mIsAsAlarm = false;
+
     /**
      * A special implementation of SimpleCursorAdapter that knows how to bind
      * our cursor data to our list item structure, and takes care of other
      * advanced features such as indexing and filtering.
      */
-    class TrackListAdapter extends SimpleCursorAdapter implements SectionIndexer {
+    class TrackListAdapter extends SimpleCursorAdapter
+            implements SectionIndexer {
         final ListView mListView;
 
         private final StringBuilder mBuilder = new StringBuilder();
@@ -162,6 +185,7 @@ public class MusicPicker extends ListActivity
         private int mArtistIdx;
         private int mAlbumIdx;
         private int mDurationIdx;
+        private int mDataIdx;
 
         private boolean mLoading = true;
         private int mIndexerSortMode;
@@ -174,10 +198,12 @@ public class MusicPicker extends ListActivity
             RadioButton radio;
             ImageView play_indicator;
             CharArrayBuffer buffer1;
-            char[] buffer2;
+            char [] buffer2;
+            ImageView drm_icon;
         }
 
-        TrackListAdapter(Context context, ListView listView, int layout, String[] from, int[] to) {
+        TrackListAdapter(Context context, ListView listView, int layout,
+                String[] from, int[] to) {
             super(context, layout, null, from, to);
             mListView = listView;
             mUnknownArtist = context.getString(R.string.unknown_artist_name);
@@ -214,6 +240,7 @@ public class MusicPicker extends ListActivity
             vh.play_indicator = (ImageView) v.findViewById(R.id.play_indicator);
             vh.buffer1 = new CharArrayBuffer(100);
             vh.buffer2 = new char[200];
+            vh.drm_icon = (ImageView) v.findViewById(R.id.drm_icon);
             v.setTag(vh);
             return v;
         }
@@ -261,9 +288,8 @@ public class MusicPicker extends ListActivity
             // changes.
             final long id = cursor.getLong(mIdIdx);
             vh.radio.setChecked(id == mSelectedId);
-            if (DBG)
-                Log.v(TAG, "Binding id=" + id + " sel=" + mSelectedId + " playing=" + mPlayingId
-                                + " cursor=" + cursor);
+            if (DBG) Log.v(TAG, "Binding id=" + id + " sel=" + mSelectedId
+                    + " playing=" + mPlayingId + " cursor=" + cursor);
 
             // Likewise, display the "now playing" icon if this item is
             // currently being previewed for the user.
@@ -274,6 +300,24 @@ public class MusicPicker extends ListActivity
             } else {
                 iv.setVisibility(View.GONE);
             }
+
+            // Show DRM lock icon on track list
+            String data = cursor.getString(mDataIdx);
+            boolean isDrm = !TextUtils.isEmpty(data)
+                    && (data.endsWith(".dm") || data.endsWith(".dcf"));
+            if (isDrm) {
+                vh.drm_icon.setVisibility(View.VISIBLE);
+            } else {
+                vh.drm_icon.setVisibility(View.GONE);
+            }
+            final int index = mCursor.getPosition();
+            view.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    mCursor.moveToPosition(index);
+                    setSelected(mCursor);
+                }
+            });
         }
 
         /**
@@ -284,8 +328,8 @@ public class MusicPicker extends ListActivity
         @Override
         public void changeCursor(Cursor cursor) {
             super.changeCursor(cursor);
-            if (DBG)
-                Log.v(TAG, "Setting cursor to: " + cursor + " from: " + MusicPicker.this.mCursor);
+            if (DBG) Log.v(TAG, "Setting cursor to: " + cursor
+                    + " from: " + MusicPicker.this.mCursor);
 
             MusicPicker.this.mCursor = cursor;
 
@@ -296,6 +340,7 @@ public class MusicPicker extends ListActivity
                 mArtistIdx = cursor.getColumnIndex(MediaStore.Audio.Media.ARTIST);
                 mAlbumIdx = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM);
                 mDurationIdx = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION);
+                mDataIdx = cursor.getColumnIndex(MediaStore.Audio.Media.DATA);
 
                 // If the sort mode has changed, or we haven't yet created an
                 // indexer one, then create a new one that is indexing the
@@ -311,11 +356,11 @@ public class MusicPicker extends ListActivity
                             idx = mAlbumIdx;
                             break;
                     }
-                    mIndexer = new MusicAlphabetIndexer(
-                            cursor, idx, getResources().getString(R.string.fast_scroll_alphabet));
+                    mIndexer = new MusicAlphabetIndexer(cursor, idx,
+                            getResources().getString(R.string.fast_scroll_alphabet));
 
-                    // If we have a valid indexer, but the cursor has changed since
-                    // its last use, then point it to the current cursor.
+                // If we have a valid indexer, but the cursor has changed since
+                // its last use, then point it to the current cursor.
                 } else {
                     mIndexer.setCursor(cursor);
                 }
@@ -371,11 +416,17 @@ public class MusicPicker extends ListActivity
 
         @Override
         protected void onQueryComplete(int token, Object cookie, Cursor cursor) {
+            if (getListView().getCount() == 0) {
+                mOkayButton.setEnabled(false);
+            }
             if (!isFinishing()) {
                 // Update the adapter: we are no longer loading, and have
                 // a new cursor for it.
                 mAdapter.setLoading(false);
                 mAdapter.changeCursor(cursor);
+                if (getListView().getCount() != 0) {
+                    mOkayButton.setEnabled(true);
+                }
                 setProgressBarIndeterminateVisibility(false);
 
                 // Now that the cursor is populated again, it's possible to restore the list state
@@ -397,15 +448,19 @@ public class MusicPicker extends ListActivity
     @Override
     public void onCreate(Bundle icicle) {
         super.onCreate(icicle);
+        mAudioManager = (AudioManager) MusicPicker.this.getSystemService(Context.AUDIO_SERVICE);
 
         requestWindowFeature(Window.FEATURE_INDETERMINATE_PROGRESS);
 
+        mIsAsAlarm = getIntent().getBooleanExtra("mIsAsAlarm", false);
+
         int sortMode = TRACK_MENU;
         if (icicle == null) {
-            mSelectedUri =
-                    getIntent().getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI);
+            mSelectedUri = getIntent().getParcelableExtra(
+                    RingtoneManager.EXTRA_RINGTONE_EXISTING_URI);
         } else {
-            mSelectedUri = (Uri) icicle.getParcelable(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI);
+            mSelectedUri = (Uri)icicle.getParcelable(
+                    RingtoneManager.EXTRA_RINGTONE_EXISTING_URI);
             // Retrieve list state. This will be applied after the
             // QueryHandler has run
             mListState = icicle.getParcelable(LIST_STATE_KEY);
@@ -431,8 +486,10 @@ public class MusicPicker extends ListActivity
 
         listView.setItemsCanFocus(false);
 
-        mAdapter = new TrackListAdapter(
-                this, listView, R.layout.music_picker_item, new String[] {}, new int[] {});
+        mAdapter = new TrackListAdapter(this, listView,
+                R.layout.music_picker_item, new String[] {},
+                new int[] {});
+        mAdapter.registerDataSetObserver(mDataSetObservable);
 
         setListAdapter(mAdapter);
 
@@ -472,25 +529,40 @@ public class MusicPicker extends ListActivity
             }
         }
 
+        IntentFilter f = new IntentFilter();
+        f.addAction(Intent.ACTION_MEDIA_SCANNER_STARTED);
+        f.addAction(Intent.ACTION_MEDIA_SCANNER_FINISHED);
+        f.addDataScheme("file");
+        registerReceiver(mScanListener, f);
         setSortMode(sortMode);
     }
 
-    @Override
-    public void onRestart() {
+    private final BroadcastReceiver mScanListener = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+
+            if (Intent.ACTION_MEDIA_SCANNER_STARTED.equals(action) ||
+                    Intent.ACTION_MEDIA_SCANNER_FINISHED.equals(action)) {
+                MusicUtils.setSpinnerState(MusicPicker.this);
+            }
+            doQuery(false, null);
+        }
+    };
+
+    @Override public void onRestart() {
         super.onRestart();
         doQuery(false, null);
     }
 
-    @Override
-    public boolean onOptionsItemSelected(MenuItem item) {
+    @Override public boolean onOptionsItemSelected(MenuItem item) {
         if (setSortMode(item.getItemId())) {
             return true;
         }
         return super.onOptionsItemSelected(item);
     }
 
-    @Override
-    public boolean onCreateOptionsMenu(Menu menu) {
+    @Override public boolean onCreateOptionsMenu(Menu menu) {
         super.onCreateOptionsMenu(menu);
         menu.add(Menu.NONE, TRACK_MENU, Menu.NONE, R.string.sort_by_track);
         menu.add(Menu.NONE, ALBUM_MENU, Menu.NONE, R.string.sort_by_album);
@@ -498,24 +570,24 @@ public class MusicPicker extends ListActivity
         return true;
     }
 
-    @Override
-    protected void onSaveInstanceState(Bundle icicle) {
+    @Override protected void onSaveInstanceState(Bundle icicle) {
         super.onSaveInstanceState(icicle);
         // Save list state in the bundle so we can restore it after the
         // QueryHandler has run
+        icicle.putParcelable(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, mSelectedUri);
         icicle.putParcelable(LIST_STATE_KEY, getListView().onSaveInstanceState());
         icicle.putBoolean(FOCUS_KEY, getListView().hasFocus());
         icicle.putInt(SORT_MODE_KEY, mSortMode);
     }
 
-    @Override
-    public void onPause() {
+    @Override public void onPause() {
         super.onPause();
         stopMediaPlayer();
+        mAudioManager.abandonAudioFocus(null);
+        getListView().invalidateViews();
     }
 
-    @Override
-    public void onStop() {
+    @Override public void onStop() {
         super.onStop();
 
         // We don't want the list to display the empty state, since when we
@@ -524,6 +596,25 @@ public class MusicPicker extends ListActivity
         // setLoading(false) will be called.
         mAdapter.setLoading(true);
         mAdapter.changeCursor(null);
+    }
+
+    @Override
+    protected void onDestroy() {
+        unregisterReceiver(mScanListener);
+        if (mAdapter != null) {
+            mAdapter.unregisterDataSetObserver(mDataSetObservable);
+        }
+        super.onDestroy();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_UP &&
+                event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            finish();
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     /**
@@ -554,6 +645,7 @@ public class MusicPicker extends ListActivity
                     doQuery(false, null);
                     return true;
             }
+
         }
         return false;
     }
@@ -565,11 +657,11 @@ public class MusicPicker extends ListActivity
     void makeListShown() {
         if (!mListShown) {
             mListShown = true;
-            mProgressContainer.startAnimation(
-                    AnimationUtils.loadAnimation(this, android.R.anim.fade_out));
+            mProgressContainer.startAnimation(AnimationUtils.loadAnimation(
+                    this, android.R.anim.fade_out));
             mProgressContainer.setVisibility(View.GONE);
-            mListContainer.startAnimation(
-                    AnimationUtils.loadAnimation(this, android.R.anim.fade_in));
+            mListContainer.startAnimation(AnimationUtils.loadAnimation(
+                    this, android.R.anim.fade_in));
             mListContainer.setVisibility(View.VISIBLE);
         }
     }
@@ -592,7 +684,7 @@ public class MusicPicker extends ListActivity
 
         // We want to show all audio files, even recordings.  Enforcing the
         // following condition would hide recordings.
-        // where.append(" AND " + MediaStore.Audio.Media.IS_MUSIC + "=1");
+        //where.append(" AND " + MediaStore.Audio.Media.IS_MUSIC + "=1");
 
         Uri uri = mBaseUri;
         if (!TextUtils.isEmpty(filterstring)) {
@@ -601,32 +693,50 @@ public class MusicPicker extends ListActivity
 
         if (sync) {
             try {
-                return getContentResolver().query(
-                        uri, CURSOR_COLS, where.toString(), null, mSortOrder);
+                return getContentResolver().query(uri, CURSOR_COLS,
+                        where.toString(), null, mSortOrder);
             } catch (UnsupportedOperationException ex) {
             }
         } else {
             mAdapter.setLoading(true);
             setProgressBarIndeterminateVisibility(true);
-            mQueryHandler.startQuery(
-                    MY_QUERY_TOKEN, null, uri, CURSOR_COLS, where.toString(), null, mSortOrder);
+            mQueryHandler.startQuery(MY_QUERY_TOKEN, null, uri, CURSOR_COLS,
+                    where.toString(), null, mSortOrder);
         }
         return null;
     }
 
-    @Override
-    protected void onListItemClick(ListView l, View v, int position, long id) {
+    @Override protected void onListItemClick(ListView l, View v, int position,
+            long id) {
         mCursor.moveToPosition(position);
-        if (DBG)
-            Log.v(TAG, "Click on " + position + " (id=" + id + ", cursid="
-                            + mCursor.getLong(mCursor.getColumnIndex(MediaStore.Audio.Media._ID))
-                            + ") in cursor " + mCursor + " adapter=" + l.getAdapter());
+        if (DBG) Log.v(TAG, "Click on " + position + " (id=" + id
+                + ", cursid="
+                + mCursor.getLong(mCursor.getColumnIndex(MediaStore.Audio.Media._ID))
+                + ") in cursor " + mCursor
+                + " adapter=" + l.getAdapter());
         setSelected(mCursor);
     }
 
     void setSelected(Cursor c) {
         Uri uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
         long newId = mCursor.getLong(mCursor.getColumnIndex(MediaStore.Audio.Media._ID));
+
+        String data = mCursor.getString(mCursor.getColumnIndex(MediaStore.Audio.Media.DATA));
+        //TODO: DRM changes here.
+//        if (!mIsAsAlarm && (data.endsWith(".dcf") || data.endsWith(".dm"))) {
+//            DrmManagerClientWrapper drmClient = new DrmManagerClientWrapper(this);
+//            data = data.replace("/storage/emulated/0", "/storage/emulated/legacy");
+//            ContentValues values = drmClient.getMetadata(data);
+//            int drmType = values.getAsInteger("DRM-TYPE");
+//            Log.d(TAG, "setSelected:drm type = " + Integer.toString(drmType));
+//            if (drmType != DrmDeliveryType.SEPARATE_DELIVERY) { // Only SD files are sharable
+//                Toast.makeText(MusicPicker.this, R.string.no_permission_for_drm,
+//                        Toast.LENGTH_LONG).show();
+//                return;
+//            }
+//            if (drmClient != null) drmClient.release();
+//        }
+
         mSelectedUri = ContentUris.withAppendedId(uri, newId);
 
         mSelectedId = newId;
@@ -634,15 +744,19 @@ public class MusicPicker extends ListActivity
             stopMediaPlayer();
             mMediaPlayer = new MediaPlayer();
             try {
+                mAudioManager.requestAudioFocus(null,
+                        AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
                 mMediaPlayer.setDataSource(this, mSelectedUri);
                 mMediaPlayer.setOnCompletionListener(this);
-                mMediaPlayer.setAudioStreamType(AudioManager.STREAM_RING);
+                mMediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
                 mMediaPlayer.prepare();
                 mMediaPlayer.start();
                 mPlayingId = newId;
                 getListView().invalidateViews();
             } catch (IOException e) {
                 Log.w("MusicPicker", "Unable to play track", e);
+            } catch (NullPointerException e) {
+                Log.w("MusicPicker", "The mSelectedUri is invalid", e);
             }
         } else if (mMediaPlayer != null) {
             stopMediaPlayer();
@@ -682,5 +796,32 @@ public class MusicPicker extends ListActivity
                 finish();
                 break;
         }
+    }
+
+    private Handler mUiHandler = new Handler();
+    private Runnable mOkUpdater = new Runnable() {
+
+        @Override
+        public void run() {
+            if (!isFinishing()) {
+                //Okay Button should be disabled while ListView changing as empty
+                mOkayButton.setEnabled(getListView().getCount() != 0);
+            }
+        }
+    };
+
+    private DataSetObserver mDataSetObservable = new DataSetObserver() {
+
+        @Override
+        public void onChanged() {
+            updateOkButton();
+        }
+    };
+
+    private void updateOkButton() {
+        mUiHandler.removeCallbacks(mOkUpdater);
+        // Do not update immediately since DataSetObserver's onChanged()
+        // may be invoked a large number of times in a short time
+        mUiHandler.postDelayed(mOkUpdater, 300);
     }
 }
